@@ -9,6 +9,10 @@ provides a framework for easily performing operations on all the entities
 matched by any arbitrary datastore query, as well as providing an administrative
 interface to monitor and control batch update jobs.
 
+This is a fork of the original bulk update by Nicholas Johnson; the original is 
+now deprecated in favor of the Map/Reduce library.  However, map-reduce doesn't 
+work for our purposes (Django app-engine-patch, which requires monkeypatching 
+before models can be accessed).
 
 Installation
 ------------
@@ -17,7 +21,7 @@ Installation consists of 3 steps, one of which is optional.
 
 ### 1. Installing the library
 
-[Download](http://github.com/downloads/Arachnid/bulkupdate/bulkupdate-0.1.tgz)
+[Download](http://github.com/downloads/huxoll/bulkupdate/bulkupdate-0.1.tgz)
 a copy of the library, or check it out from git, and install it in a
 directory named 'bulkupdate', directly off your application's root directory.
 
