@@ -131,6 +131,8 @@ class Status(db.Model):
   start_time = db.DateTimeProperty(required=True, auto_now_add=True)
   # Last time this status was updated
   last_update = db.DateTimeProperty(required=True, auto_now_add=True)
+  # New property over the original bulkupdate: string tag to describe the kind of job
+  tag = db.StringProperty(required=False)
 
   @classmethod
   def kind(cls):

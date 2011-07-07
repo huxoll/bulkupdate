@@ -5,8 +5,9 @@ import time
 import traceback
 from google.appengine.api import mail
 from google.appengine.api import memcache
-from google.appengine.api.labs import taskqueue
+from google.appengine.api import taskqueue
 from google.appengine.ext import db
+from google.appengine.ext import deferred
 from google.appengine.ext.deferred import defer
 from google.appengine.runtime import apiproxy_errors
 
@@ -47,11 +48,11 @@ class BulkUpdater(object):
   # URL of task queue handler. Defaults to the default deferred handler location
   QUEUE_URL = None
 
-  def __init__(self):
+  def __init__(self, tag=None):
     self.__to_put = []
     self.__to_delete = []
     self.__log_entries = []
-    self._status = model.Status()
+    self._status = model.Status(tag=tag)
     self.task_id = 0
     self.current_key = None
 
