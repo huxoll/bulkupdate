@@ -3,6 +3,7 @@ import logging
 import sys
 import time
 import traceback
+import common.appenginepatch.main
 from google.appengine.api import mail
 from google.appengine.api import memcache
 from google.appengine.api import taskqueue
@@ -17,7 +18,7 @@ cache = memcache.Client()
 
 class BulkUpdater(object):
     """A bulk updater for datastore entities.
-    
+
     Subclasses should implement, at a minimum, get_query and handle_entity.
     """
 
@@ -28,7 +29,7 @@ class BulkUpdater(object):
     DELETE_BATCH_SIZE = 100
 
     # Maximum time to spend processing before enqueueing the next task in seconds.
-    MAX_EXECUTION_TIME = 20.0
+    MAX_EXECUTION_TIME = 45.0
 
     # Maximum number of failures to tolerate before aborting. -1 indicates
     # no limit, in which case the list of failed keys will not be retained.
@@ -49,6 +50,8 @@ class BulkUpdater(object):
     # URL of task queue handler. Defaults to the default deferred handler location
     QUEUE_URL = None
 
+    # Target instance (Backend, perhaps) to run the update.
+    TARGET = None
 
     def __init__(self, tag=None):
         self.__to_put = []
@@ -57,6 +60,7 @@ class BulkUpdater(object):
         self._status = model.Status(tag=tag)
         self.task_id = 0
         self.current_key = None
+        self.__oid = "0x" + str("%X" % id( self )).zfill(16)
 
     def __getstate__(self):
         state = dict(self.__dict__)
@@ -80,7 +84,7 @@ class BulkUpdater(object):
 
     def handle_entity(self, entity):
         """Performs processing on a single entity.
-        
+
         Args:
           entity: A db.Model instance to update.
         """
@@ -98,9 +102,9 @@ class BulkUpdater(object):
 
     def put(self, entities):
         """Stores updated entities to the datastore.
-        
+
         Updates are batched for efficiency.
-        
+
         Args:
           entities: An entity, or list of entities, to store.
         """
@@ -110,14 +114,15 @@ class BulkUpdater(object):
         self._status.num_put += len(entities)
 
         while len(self.__to_put) > self.PUT_BATCH_SIZE:
+            #logging.info("Bulkupdater %s: draining put queue." % self.__oid)
             db.put(self.__to_put[-self.PUT_BATCH_SIZE:])
             del self.__to_put[-self.PUT_BATCH_SIZE:]
 
     def delete(self, entities):
         """Deletes entities from the datastore.
-        
+
         Deletes are batched for efficiency.
-        
+
         Args:
           entities: An entity, key, or list of entities or keys, to delete.
         """
@@ -150,12 +155,15 @@ class BulkUpdater(object):
 
     def _process_entities(self, q):
         """Processes a batch of entities.
-        
+
         Args:
           q: A query to iterate over doing processing.
         Returns:
           True if the update process has finished, False otherwise.
         """
+        #logging.info("Bulkupdater %s: begin processing batch." % self.__oid)
+        #logging.debug("Bulkupdater %s: put list: %d" % (self.__oid, len(self._BulkUpdater__to_put)))
+
         end_time = time.time() + self.MAX_EXECUTION_TIME
         for entity in q:
             if isinstance(entity, db.Key):
@@ -177,20 +185,27 @@ class BulkUpdater(object):
                     if self._status.num_errors > self.MAX_FAILURES:
                         # Update completed (failure)
                         self._status.state = model.Status.STATE_FAILED
+                        #logging.debug("Bulkupdater %s: stopping due to failure: puts: %d" % (self.__oid, len(self._BulkUpdater__to_put)))
                         return True
 
             self._status.num_processed += 1
 
             if time.time() > end_time:
+                #logging.debug("Bulkupdater %s: stopping due to time limit: puts: %d" % (self.__oid, len(self._BulkUpdater__to_put)))
                 return False
 
         # The loop finished - we're done!
         self._status.state = model.Status.STATE_COMPLETED
+        #logging.debug("Bulkupdater %s: stopping due to completion: puts: %d" % (self.__oid, len(self._BulkUpdater__to_put)))
         return True
 
     def _get_task_name(self):
-        return "-bulkupdate-%s-task-%d" % (self._status.key().id_or_name(),
-                                           self.task_id)
+        if self._status.tag:
+            return "-bulkupdate-%s-%s-%d" % (self._status.key().id_or_name(),
+                                            self._status.tag, self.task_id)
+        else:
+            return "-bulkupdate-%s-task-%d" % (self._status.key().id_or_name(),
+                                               self.task_id)
 
 
     def _defer_run(self, *args, **kwargs):
@@ -199,14 +214,26 @@ class BulkUpdater(object):
             kwargs['_queue'] = self.QUEUE_NAME
         if self.QUEUE_URL:
             kwargs['_url'] = self.QUEUE_URL
+        if self.TARGET:
+            kwargs['_target'] = self.TARGET
         try:
             defer(self._run, _name=self._get_task_name(), *args, **kwargs)
-        except (taskqueue.TaskAlreadyExistsError, taskqueue.TombstonedTaskError), e:
+        except (taskqueue.TaskAlreadyExistsError, taskqueue.TombstonedTaskError), unused_e:
             pass
 
     def _run(self, _start_cursor=None):
         """Begins or continues a batch update process."""
+        #logging.debug(
+        #             "Running %s; so far %d entities in %d tasks, put %d and deleted %d",
+        #             self.__oid,
+        #             self._status.num_processed, self._status.num_tasks, self._status.num_put,
+        #             self._status.num_deleted)
         status = self._status
+        #logging.debug(
+        #             "Running %s; so far %d entities in %d tasks, put %d and deleted %d",
+        #             self.__oid,
+        #             status.num_processed, status.num_tasks, status.num_put,
+        #             status.num_deleted)
 
         if not status:
             logging.error("Job entity not found.")
@@ -223,8 +250,8 @@ class BulkUpdater(object):
             logging.warn("Terminating cancelled job.")
             return
 
-        logging.info("This is task %d for bulkupdate job %r",
-                 self.task_id, self._status.key())
+        logging.info("This is task %d for bulkupdate (%s) job %r",
+                 self.task_id, self._status.tag, self._status.key())
 
         q = self.get_query()
         if _start_cursor:
@@ -286,12 +313,12 @@ class BulkPut(BulkUpdater):
 
 
 class BulkDelete(BulkUpdater):
-  def __init__(self, query):
+    def __init__(self, query):
         super(BulkDelete, self).__init__()
         self.query = query
 
-  def get_query(self):
+    def get_query(self):
         return self.query
 
-  def handle_entity(self, entity):
+    def handle_entity(self, entity):
         self.delete(entity)
