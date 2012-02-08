@@ -3,7 +3,7 @@ import logging
 import sys
 import time
 import traceback
-import common.appenginepatch.main
+from common.appenginepatch.main import *
 from google.appengine.api import mail
 from google.appengine.api import memcache
 from google.appengine.api import taskqueue
@@ -27,6 +27,9 @@ class BulkUpdater(object):
 
     # Number of entities to delete() at once.
     DELETE_BATCH_SIZE = 100
+
+    # If True, perform puts and deletes asynchronously.
+    DB_ASYNC = False
 
     # Maximum time to spend processing before enqueueing the next task in seconds.
     MAX_EXECUTION_TIME = 45.0
@@ -61,6 +64,8 @@ class BulkUpdater(object):
         self.task_id = 0
         self.current_key = None
         self.__oid = "0x" + str("%X" % id( self )).zfill(16)
+        if self.DB_ASYNC:
+            self.futures = []
 
     def __getstate__(self):
         state = dict(self.__dict__)
@@ -114,8 +119,10 @@ class BulkUpdater(object):
         self._status.num_put += len(entities)
 
         while len(self.__to_put) > self.PUT_BATCH_SIZE:
-            #logging.info("Bulkupdater %s: draining put queue." % self.__oid)
-            db.put(self.__to_put[-self.PUT_BATCH_SIZE:])
+            if self.DB_ASYNC:
+                self.futures.append(db.put_async(self.__to_put[-self.PUT_BATCH_SIZE:]))
+            else:
+                db.put(self.__to_put[-self.PUT_BATCH_SIZE:])
             del self.__to_put[-self.PUT_BATCH_SIZE:]
 
     def delete(self, entities):
@@ -132,7 +139,10 @@ class BulkUpdater(object):
         self._status.num_deleted += len(entities)
 
         while len(self.__to_delete) > self.DELETE_BATCH_SIZE:
-            db.delete(self.__to_delete[-self.DELETE_BATCH_SIZE:])
+            if self.DB_ASYNC:
+                self.futures.append(db.delete_async(self.__to_delete[-self.DELETE_BATCH_SIZE:]))
+            else:
+                db.delete(self.__to_delete[-self.DELETE_BATCH_SIZE:])
             del self.__to_delete[-self.DELETE_BATCH_SIZE:]
 
     def handle_exception(self):
@@ -185,18 +195,15 @@ class BulkUpdater(object):
                     if self._status.num_errors > self.MAX_FAILURES:
                         # Update completed (failure)
                         self._status.state = model.Status.STATE_FAILED
-                        #logging.debug("Bulkupdater %s: stopping due to failure: puts: %d" % (self.__oid, len(self._BulkUpdater__to_put)))
                         return True
 
             self._status.num_processed += 1
 
             if time.time() > end_time:
-                #logging.debug("Bulkupdater %s: stopping due to time limit: puts: %d" % (self.__oid, len(self._BulkUpdater__to_put)))
                 return False
 
         # The loop finished - we're done!
         self._status.state = model.Status.STATE_COMPLETED
-        #logging.debug("Bulkupdater %s: stopping due to completion: puts: %d" % (self.__oid, len(self._BulkUpdater__to_put)))
         return True
 
     def _get_task_name(self):
@@ -263,9 +270,18 @@ class BulkUpdater(object):
 
         # Store or delete any remaining entities
         if self.__to_put:
-            db.put(self.__to_put)
+            if self.DB_ASYNC:
+                self.futures.append(db.put(self.__to_put))
+            else:
+                db.put(self.__to_put)
         if self.__to_delete:
-            db.delete(self.__to_delete)
+            if self.DB_ASYNC:
+                self.futures(db.delete(self.__to_delete))
+            else:
+                db.delete(self.__to_delete)
+
+        if self.DB_ASYNC:
+            self.drain_futures()
 
         log_entries = self.__log_entries
         self.__log_entries = []
@@ -299,6 +315,13 @@ class BulkUpdater(object):
         self._defer_run()
         return self._status.key()
 
+    def drain_futures(self):
+        """Confirm all futures have been completed."""
+        for future in self.futures:
+            try:
+                unused = future.get_result()
+            except Exception:
+                self.handle_exception()
 
 class BulkPut(BulkUpdater):
     def __init__(self, query):
